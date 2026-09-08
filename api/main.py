@@ -122,7 +122,10 @@ app = FastAPI(title="Garmin Training Coach API", version="0.1.0", lifespan=lifes
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
-
+"""
+Since every request currently defaults to "default", in practice this app treats every user as the same one person — 
+there's no real multi-user separation yet unless someone starts passing a different user_id.
+"""
 class ChatRequest(BaseModel):
     message: str
     user_id: str = "default"
@@ -138,7 +141,7 @@ class ChatResponse(BaseModel):
 async def health():
     return {"status": "ok"}
 
-
+# only returns once everything is done
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     graph = app.state.graph
@@ -181,6 +184,7 @@ async def chat_stream(request: ChatRequest):
             async with asyncio.timeout(90):
                 async for event in graph.astream_events(
                     {
+                        # the langgraph abstract away the process of storing the user prompt into the state message
                         "messages": [{"role": "user", "content": request.message}],
                         "user_id": request.user_id,
                         "memories": [],

@@ -4,7 +4,10 @@ from typing import Annotated, Sequence, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-
+"""
+"whenever any node returns a new value for messages, don't just overwrite the field — call add_messages(old_value, new_value) and use that as the new state." 
+The actual mechanics of combining (append vs. replace-by-id, as we saw in add_messages's code) are hidden inside the reducer function itself, supplied by the library.
+"""
 class State(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]  # in-memory chat history for the current session
     user_id: str

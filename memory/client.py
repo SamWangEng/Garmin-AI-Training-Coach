@@ -58,6 +58,7 @@ class MemoryManager:
 
     def _init(self) -> tuple:
         # Tier 1: mem0 hosted
+        # This is a thin HTTP client. Your app sends raw text to mem0's cloud service
         if os.getenv("MEM0_API_KEY"):
             try:
                 from mem0 import MemoryClient
@@ -67,6 +68,7 @@ class MemoryManager:
                 print(f"[memory] mem0 hosted init failed: {e}")
 
         # Tier 2: mem0 local with Anthropic LLM
+        # The actual code in mem0/memory/main.py
         try:
             from mem0 import Memory
             config = {
@@ -86,12 +88,14 @@ class MemoryManager:
         # Tier 3: simple JSON fallback
         return SimpleMemory(), "simple"
 
+    # Storing the memory
     def add(self, messages: list[dict], user_id: str = "default") -> None:
         try:
             self._client.add(messages, user_id=user_id)
         except Exception as e:
             print(f"[memory] add failed: {e}")
 
+    # Retreiving the memory
     def search(self, query: str, user_id: str = "default", limit: int = 5) -> dict:
         try:
             if self._mode == "mem0_hosted":

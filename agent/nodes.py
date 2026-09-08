@@ -1,11 +1,15 @@
 """LangGraph node functions for the training coach agent."""
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, trim_messages
 from langgraph.prebuilt import ToolNode
 
 from memory.client import get_memory_client
 from agent.types import MemoryUpdate, ModelUpdate
 from agent.router import route_tools, select_tools
+
+# Cap on conversation history sent to the model per call. Tuned empirically —
+# adjust based on observed [tokens] cost/latency, not a hard model limit.
+MAX_HISTORY_TOKENS = 8000
 
 SYSTEM_PROMPT = """\
 You are a personal AI running coach with direct access to the user's Garmin Connect data.
@@ -77,8 +81,23 @@ def make_nodes(tools: list) -> tuple:
         routed_tools = select_tools(tools, categories) if categories else tools
         print(f"[router] categories={categories} tools_selected={len(routed_tools)}/{len(tools)}")
 
-        routed_model = model.bind_tools(routed_tools)
-        messages = [SystemMessage(content=system_blocks)] + list(state["messages"])
+        routed_model = model.bind_tools(routed_tools) #attach to model (no network call, no tool execution)
+
+        # Cap history sent to the model — state["messages"] keeps growing every turn
+        # (that's the short-term memory), but resending all of it on every tool-call
+        # round-trip gets expensive. start_on="human" avoids leaving a dangling
+        # ToolMessage/tool_use fragment at the front after trimming.
+        history = trim_messages(
+            state["messages"],
+            max_tokens=MAX_HISTORY_TOKENS,
+            token_counter="approximate",
+            strategy="last",
+            start_on="human",
+        )
+        if len(history) < len(state["messages"]):
+            print(f"[trim] kept {len(history)}/{len(state['messages'])} messages (cap={MAX_HISTORY_TOKENS} tokens)")
+
+        messages = [SystemMessage(content=system_blocks)] + history
         response = await routed_model.ainvoke(messages)
 
         # Token usage logging — input/output plus cache write/read for caching visibility.
@@ -93,7 +112,7 @@ def make_nodes(tools: list) -> tuple:
                 f"cache_read={cache_read} "
                 f"tools_bound={len(routed_tools)}"
             )
-
+        #  It's this return value that then goes through the add_messages reducer we discussed, merging just the new AI response onto the real, persisted state["messages"].
         return ModelUpdate(messages=[response])
 
     async def save_memories(state: dict) -> dict:
