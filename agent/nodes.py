@@ -11,6 +11,11 @@ from agent.router import route_tools, select_tools
 # adjust based on observed [tokens] cost/latency, not a hard model limit.
 MAX_HISTORY_TOKENS = 8000
 
+# Hard cap on tools -> call_model round-trips per turn. Without this, a model
+# that keeps re-requesting the same tool (e.g. after a trim wipes the history
+# fallback back to just the last human message) could loop indefinitely.
+MAX_TOOL_ITERATIONS = 5
+
 SYSTEM_PROMPT = """\
 You are a personal AI running coach with direct access to the user's Garmin Connect data.
 
@@ -97,6 +102,19 @@ def make_nodes(tools: list) -> tuple:
         if len(history) < len(state["messages"]):
             print(f"[trim] kept {len(history)}/{len(state['messages'])} messages (cap={MAX_HISTORY_TOKENS} tokens)")
 
+        if not history:
+            # trim_messages can return [] if nothing survives the cap (e.g. one very
+            # long message with no newlines for allow_partial to split on). Fall back
+            # to the most recent HumanMessage specifically — never to whatever raw
+            # message happens to be last, since that could be an orphaned
+            # ToolMessage/AIMessage tool-call fragment (the exact invalid shape
+            # start_on="human" exists to prevent).
+            for m in reversed(list(state["messages"])):
+                if isinstance(m, HumanMessage):
+                    history = [m]
+                    break
+            print("[trim] history emptied by token cap — fell back to last HumanMessage")
+
         messages = [SystemMessage(content=system_blocks)] + history
         response = await routed_model.ainvoke(messages)
 
@@ -112,8 +130,14 @@ def make_nodes(tools: list) -> tuple:
                 f"cache_read={cache_read} "
                 f"tools_bound={len(routed_tools)}"
             )
+        # Track rounds through the tools loop — should_continue force-stops once
+        # MAX_TOOL_ITERATIONS is hit, regardless of whether Claude requests another tool.
+        tool_call_count = state.get("tool_call_count", 0)
+        if getattr(response, "tool_calls", None):
+            tool_call_count += 1
+
         #  It's this return value that then goes through the add_messages reducer we discussed, merging just the new AI response onto the real, persisted state["messages"].
-        return ModelUpdate(messages=[response])
+        return ModelUpdate(messages=[response], tool_call_count=tool_call_count)
 
     async def save_memories(state: dict) -> dict:
         user_id = state.get("user_id", "default")
@@ -141,8 +165,12 @@ def make_nodes(tools: list) -> tuple:
 
     def should_continue(state: dict) -> str:
         last = state["messages"][-1]
-        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
-            return "tools"
+        wants_tool = isinstance(last, AIMessage) and getattr(last, "tool_calls", None)
+        if wants_tool and state.get("tool_call_count", 0) >= MAX_TOOL_ITERATIONS:
+            print(f"[tools] hit MAX_TOOL_ITERATIONS={MAX_TOOL_ITERATIONS}, forcing stop")
+            return "save_memories"
+        if wants_tool:
+            return "tools" #langgraph abstract away "call the tools" logic, it run the tools parallelly if there're multiple tools
         return "save_memories"
 
     return retrieve_memories, call_model, save_memories, should_continue, tool_node

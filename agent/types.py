@@ -12,6 +12,7 @@ class State(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]  # in-memory chat history for the current session
     user_id: str
     memories: list[str]  # long-term facts retrieved from mem0 that persist across sessions
+    tool_call_count: int  # rounds through the tools node this turn — no reducer, plain overwrite
 
 
 # Return types for each node — forces correct key names at the call site
@@ -21,3 +22,4 @@ class MemoryUpdate(TypedDict):
 
 class ModelUpdate(TypedDict):
     messages: list[BaseMessage]
+    tool_call_count: int
