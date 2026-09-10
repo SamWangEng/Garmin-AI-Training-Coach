@@ -18,6 +18,7 @@ class State(TypedDict):
 # Return types for each node — forces correct key names at the call site
 class MemoryUpdate(TypedDict):
     memories: list[str]
+    tool_call_count: int
 
 
 class ModelUpdate(TypedDict):

@@ -53,15 +53,19 @@ def make_nodes(tools: list) -> tuple:
                 query = m.content
                 break
 
+        # retrieve_memories runs first on every turn (START -> retrieve_memories),
+        # so this is where tool_call_count resets — it has no reducer, so without
+        # an explicit reset here it would otherwise carry over and keep
+        # accumulating across the entire session instead of counting just this turn.
         if not query:
-            return MemoryUpdate(memories=[])
+            return MemoryUpdate(memories=[], tool_call_count=0)
 
         try:
             memories = memory_client.search_for_user(query, user_id=user_id)
         except Exception as e:
             print(f"[memory] retrieve failed (non-critical): {e}")
             memories = []
-        return MemoryUpdate(memories=memories)
+        return MemoryUpdate(memories=memories, tool_call_count=0)
 
     async def call_model(state: dict) -> ModelUpdate:
         memories = state.get("memories", [])
