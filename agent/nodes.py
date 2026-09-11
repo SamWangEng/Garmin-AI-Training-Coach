@@ -96,35 +96,49 @@ def make_nodes(tools: list) -> tuple:
 
         routed_model = model.bind_tools(routed_tools) #attach to model (no network call, no tool execution)
 
-        # Cap history sent to the model — state["messages"] keeps growing every turn
-        # (that's the short-term memory), but resending all of it on every tool-call
-        # round-trip gets expensive. start_on="human" avoids leaving a dangling
-        # ToolMessage/tool_use fragment at the front after trimming.
-        history = trim_messages(
-            state["messages"],
-            max_tokens=MAX_HISTORY_TOKENS,
-            token_counter="approximate",
-            strategy="last",
-            start_on="human",
-        )
-        if len(history) < len(state["messages"]):
-            print(f"[trim] kept {len(history)}/{len(state['messages'])} messages (cap={MAX_HISTORY_TOKENS} tokens)")
+        # Only trim on the FIRST call_model pass of a turn (tool_call_count reset to
+        # 0 by retrieve_memories). Re-trimming on every pass through an in-progress
+        # tool loop caused a real failure: once accumulated tool results pushed a
+        # turn over MAX_HISTORY_TOKENS, trim_messages kept returning [] every pass,
+        # the fallback below kept resetting history to just the original question,
+        # and — since the model is temperature=0 — it deterministically re-requested
+        # the exact same tool forever, never getting to see any tool result at all,
+        # until MAX_TOOL_ITERATIONS force-stopped it with no real answer produced.
+        # Trimming only at turn-entry still caps cross-turn history growth, while
+        # letting a single turn's tool loop see everything it has already gathered.
+        if state.get("tool_call_count", 0) == 0:
+            history = trim_messages(
+                state["messages"],
+                max_tokens=MAX_HISTORY_TOKENS,
+                token_counter="approximate",
+                strategy="last", #keep the last, trim the olest message
+                start_on="human",
+            )
+            if len(history) < len(state["messages"]):
+                print(f"[trim] kept {len(history)}/{len(state['messages'])} messages (cap={MAX_HISTORY_TOKENS} tokens)")
 
-        if not history:
-            # trim_messages can return [] if nothing survives the cap (e.g. one very
-            # long message with no newlines for allow_partial to split on). Fall back
-            # to the most recent HumanMessage specifically — never to whatever raw
-            # message happens to be last, since that could be an orphaned
-            # ToolMessage/AIMessage tool-call fragment (the exact invalid shape
-            # start_on="human" exists to prevent).
-            for m in reversed(list(state["messages"])):
-                if isinstance(m, HumanMessage):
-                    history = [m]
-                    break
-            print("[trim] history emptied by token cap — fell back to last HumanMessage")
+            if not history:
+                # trim_messages can return [] if nothing survives the cap (e.g. one very
+                # long message with no newlines for allow_partial to split on). Fall back
+                # to the most recent HumanMessage specifically — never to whatever raw
+                # message happens to be last, since that could be an orphaned
+                # ToolMessage/AIMessage tool-call fragment (the exact invalid shape
+                # start_on="human" exists to prevent).
+                for m in reversed(list(state["messages"])):
+                    if isinstance(m, HumanMessage):
+                        history = [m]
+                        break
+                print("[trim] history emptied by token cap — fell back to last HumanMessage")
+        else:
+            # Mid-loop within this turn — never strip the tool results this turn
+            # has already gathered; the model needs them to finish reasoning.
+            history = list(state["messages"])
 
         messages = [SystemMessage(content=system_blocks)] + history
         response = await routed_model.ainvoke(messages)
+
+        if getattr(response, "tool_calls", None):
+            print(f"[tool_call] {[(tc['name'], tc['args']) for tc in response.tool_calls]}")
 
         # Token usage logging — input/output plus cache write/read for caching visibility.
         usage = response.usage_metadata

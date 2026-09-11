@@ -93,3 +93,49 @@ async def test_tool_call_count_resets_between_turns():
 
     assert r1["tool_call_count"] == 1
     assert r2["tool_call_count"] == 1  # must reset — not 2, which would mean it's accumulating across turns
+
+
+@tool
+def big_tool(query: str) -> str:
+    """A fake tool that returns a large result, simulating a big Garmin payload."""
+    return "x" * 12000  # ~3,000 tokens per call — exceeds MAX_HISTORY_TOKENS after ~3 rounds
+
+
+async def test_history_not_reset_mid_loop_when_tool_results_are_large():
+    """Regression test for a real production failure: once accumulated tool
+    results pushed a turn's history over MAX_HISTORY_TOKENS, trimming on every
+    call_model pass (including mid-loop) made trim_messages return [], the
+    empty-history fallback reset history to just the original question, and a
+    temperature=0 model deterministically re-requested the same tool forever
+    — never seeing any tool result — until MAX_TOOL_ITERATIONS force-stopped
+    it with no real answer produced.
+
+    Fix: only trim on the first call_model pass of a turn (tool_call_count ==
+    0). This asserts the model-visible message count grows monotonically
+    across the loop instead of collapsing back down mid-turn.
+    """
+    call_ids = itertools.count()
+    seen_lengths = []
+
+    async def mock_ainvoke(_self, messages, *_a, **_k):
+        seen_lengths.append(len(messages))
+        return AIMessage(
+            content="", tool_calls=[{"name": "big_tool", "args": {"query": "x"}, "id": f"call_{next(call_ids)}"}]
+        )
+
+    with (
+        patch("agent.nodes.get_memory_client") as mock_mc,
+        patch("agent.nodes.ChatAnthropic.ainvoke", new=mock_ainvoke),
+        patch("agent.nodes.route_tools", new=AsyncMock(return_value=[])),
+    ):
+        mock_mc.return_value.search_for_user.return_value = []
+        graph = create_graph([big_tool])
+        await graph.ainvoke(
+            {"messages": [{"role": "user", "content": "test with big tool results"}], "user_id": "test", "memories": []},
+            config={"configurable": {"thread_id": "repro-large-tool-results"}},
+        )
+
+    # Must strictly grow every pass — a drop anywhere means history got wiped
+    # mid-loop, which is exactly the bug this test guards against.
+    assert seen_lengths == sorted(seen_lengths)
+    assert all(b > a for a, b in zip(seen_lengths, seen_lengths[1:]))
